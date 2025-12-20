@@ -1,0 +1,17 @@
+# AirSwipe - Acoustic Gesture Sensing
+# Python 3.9+ required
+
+# Audio I/O
+sounddevice>=0.4.6
+
+# Signal processing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Optional: better terminal output
+rich>=13.0.0
+
+
