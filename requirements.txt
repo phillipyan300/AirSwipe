@@ -1,17 +1,18 @@
-# AirSwipe - Acoustic Gesture Sensing
-# Python 3.9+ required
+# AirSwipe - Ultrasonic Doppler Gesture Recognition
+# Core dependencies
 
 # Audio I/O
 sounddevice>=0.4.6
 
-# Signal processing
+# Numerical computing
 numpy>=1.24.0
 scipy>=1.10.0
 
 # Visualization
 matplotlib>=3.7.0
 
-# Optional: better terminal output
-rich>=13.0.0
+# Deep learning (optional, for CNN classifier)
+torch>=2.0.0
 
-
+# Development
+pytest>=7.0.0
