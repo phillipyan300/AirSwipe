@@ -171,22 +171,38 @@ class MatplotlibUI:
         
         # Filter to carrier band
         cf = self.config.carrier_freq
-        bw = self.config.doppler_bandwidth * 1.5
-        freq_mask = (freqs >= cf - bw) & (freqs <= cf + bw)
+        bw = self.config.doppler_bandwidth * 2  # ±1000 Hz around carrier
+        freq_min = cf - bw
+        freq_max = cf + bw
+        freq_mask = (freqs >= freq_min) & (freqs <= freq_max)
         
         # Log magnitude
         Sxx_db = 10 * np.log10(Sxx + 1e-10)
         
-        self._ax_spec.pcolormesh(
-            times, freqs[freq_mask], Sxx_db[freq_mask, :],
-            shading='gouraud', cmap='inferno',
-            vmin=-60, vmax=-10
-        )
-        self._ax_spec.axhline(y=cf, color='cyan', linestyle='--', 
-                              alpha=0.6, linewidth=1)
+        if np.any(freq_mask):
+            freqs_filtered = freqs[freq_mask]
+            Sxx_filtered = Sxx_db[freq_mask, :]
+            
+            # Use imshow for more reliable display
+            extent = [times.min(), times.max(), freqs_filtered.min(), freqs_filtered.max()]
+            self._ax_spec.imshow(
+                Sxx_filtered, 
+                aspect='auto', 
+                origin='lower',
+                extent=extent,
+                cmap='inferno',
+                vmin=-60, vmax=-10
+            )
+            self._ax_spec.axhline(y=cf, color='cyan', linestyle='--', 
+                                  alpha=0.8, linewidth=2, label=f'Carrier {cf:.0f}Hz')
+        else:
+            # Fallback if no data in range
+            self._ax_spec.text(0.5, 0.5, 'No data in carrier band', 
+                              transform=self._ax_spec.transAxes, ha='center')
+        
         self._ax_spec.set_ylabel('Frequency (Hz)', color='#aaa')
         self._ax_spec.set_xlabel('Time (s)', color='#aaa')
-        self._ax_spec.set_title(f'Spectrogram (carrier: {cf:.0f} Hz)', 
+        self._ax_spec.set_title(f'Spectrogram ({freq_min:.0f}-{freq_max:.0f} Hz, carrier: {cf:.0f})', 
                                color='#00ff88')
         
         # === Feature plot ===
@@ -201,14 +217,16 @@ class MatplotlibUI:
             self._ax_features.plot(x, a_arr, color='#ff8800', 
                                    linewidth=1.5, alpha=0.7, label='A(t) Activity')
             self._ax_features.axhline(y=0, color='#444', linestyle='-')
-            self._ax_features.axhline(y=self.config.activity_threshold, 
+            # Scale threshold to match data range for visibility
+            vis_threshold = max(self.config.activity_threshold, np.percentile(a_arr, 80) * 0.5) if len(a_arr) > 10 else self.config.activity_threshold
+            self._ax_features.axhline(y=vis_threshold, 
                                      color='#ff4444', linestyle='--', 
                                      alpha=0.5, label='Threshold')
+            self._ax_features.legend(loc='upper right', fontsize=8)
         
         self._ax_features.set_ylabel('Feature Value', color='#aaa')
         self._ax_features.set_xlabel('Frame', color='#aaa')
         self._ax_features.set_title('Doppler Features', color='#00ff88')
-        self._ax_features.legend(loc='upper right', fontsize=8)
         
         # Gesture overlay
         if self._gesture_text and time.time() - self._gesture_time < 2.0:

@@ -195,7 +195,8 @@ class AudioDuplex:
     def _duplex_callback(self, indata: np.ndarray, outdata: np.ndarray,
                          frames: int, time_info, status):
         """Combined I/O callback."""
-        if status:
+        # Only print occasional overflow warnings, not every single one
+        if status and 'overflow' not in str(status):
             print(f"[DUPLEX] Status: {status}")
         
         # === OUTPUT: Generate tone ===
@@ -225,12 +226,14 @@ class AudioDuplex:
         print(f"[DUPLEX] Starting at {self.config.sample_rate} Hz, "
               f"carrier {self._carrier_freq:.0f} Hz")
         
+        # Use larger blocksize to prevent buffer overflow
         self._stream = sd.Stream(
             samplerate=self.config.sample_rate,
             channels=1,
             dtype=np.float32,
             callback=self._duplex_callback,
-            blocksize=self.config.hop_size,
+            blocksize=2048,  # Larger block for stability
+            latency='high',  # Prioritize stability over latency
         )
         self._stream.start()
         self._running = True

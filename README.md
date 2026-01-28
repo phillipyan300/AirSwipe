@@ -1,121 +1,162 @@
-# AirSwipe
+# AirSwipe 🌊👋
 
-**Gesture input on macOS using acoustic sensing.**
+**Ultrasonic Doppler Gesture Recognition for macOS**
 
-AirSwipe explores whether a MacBook can sense hand swipes in the air using nothing but inaudible audio and signal processing.
-
-![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+Detect hand swipe gestures using only your MacBook's built-in speaker and microphone—no external hardware required.
 
 ## How It Works
 
-1. **Emit**: The MacBook speaker plays a near-ultrasonic tone (18–19.5 kHz)
-2. **Reflect**: Hand motion causes Doppler shifts in the reflected signal
-3. **Detect**: The microphone captures these frequency shifts
-4. **Act**: Motion patterns trigger system actions (swipe gestures)
+AirSwipe emits an ultrasonic tone (~18.5 kHz) through your laptop speaker while simultaneously recording with the microphone. When your hand moves, the reflected sound experiences a Doppler shift:
 
-No external hardware. No phone app. Just physics.
+- **Hand moving left** → frequency shifts up (approaching)
+- **Hand moving right** → frequency shifts down (receding)
 
-## Quick Start
+By analyzing the STFT (Short-Time Fourier Transform) of the recorded audio, we detect these shifts and classify gestures in real-time.
+
+## Features
+
+- **Part 1 (MVP):** Robust left/right swipe classification with "none" class
+- **Part 2 (Upgrade):** Continuous motion tracking with velocity and position visualization
+- Automatic carrier frequency selection for your hardware
+- Background noise subtraction
+- Configurable sensitivity and thresholds
+
+## Installation
 
 ```bash
-# Clone the repo
-git clone https://github.com/yourusername/airswipe.git
-cd airswipe
+# Clone the repository
+git clone https://github.com/yourusername/AirSwipe.git
+cd AirSwipe
+
+# Create virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Run feasibility test (Phase 0)
-python airswipe.py --visualize
-
-# Run with gesture detection (Phase 1+)
-python airswipe.py --detect
 ```
 
-## Requirements
+## Quick Start
 
-- macOS (tested on M1+ MacBooks)
-- Python 3.9+
-- Built-in speaker and microphone
+### 1. Find the Best Carrier Frequency
 
-## Supported Gestures
+First, scan to find the optimal ultrasonic frequency for your Mac's hardware:
 
-| Gesture | Action |
-|---------|--------|
-| Swipe Right | Next desktop/app |
-| Swipe Left | Previous desktop/app |
-| Swipe Toward | Mission Control |
-| Swipe Away | Lock screen |
-
-## Project Phases
-
-- [x] **Phase 0**: Feasibility — Generate tone, record mic, visualize spectrogram
-- [ ] **Phase 1**: Motion Detection — Compute motion scores, detect bursts
-- [ ] **Phase 2**: Gesture Classification — Segment windows, classify directions
-- [ ] **Phase 3**: System Integration — Map gestures to macOS actions
-
-## Technical Details
-
-### Signal Processing Pipeline
-
-```
-Speaker (18.5 kHz) → Air → Hand Motion → Doppler Shift → Microphone
-                                              ↓
-                              STFT → Feature Extraction → Classification
+```bash
+python main.py scan
 ```
 
-### Key Parameters
+Keep your hands away during the scan. The tool will test frequencies from 16-19.5 kHz and recommend the best one.
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Carrier Frequency | 18.5 kHz | Near-ultrasonic, mostly inaudible |
-| Sample Rate | 48 kHz | Standard audio rate |
-| Window Size | 256-512 samples | ~5-10ms for good time resolution |
-| FFT Size | 2048 | Good frequency resolution |
+### 2. Visualize the Signal
+
+See the spectrogram and Doppler features in real-time:
+
+```bash
+python main.py visualize
+```
+
+Wave your hand in front of the laptop to see:
+- Spectrogram showing energy distribution around the carrier
+- D(t) - signed Doppler proxy (positive = left, negative = right)
+- A(t) - activity level
+
+### 3. Detect Gestures
+
+Run gesture detection:
+
+```bash
+python main.py detect --freq 18500
+```
+
+Swipe your hand left or right about 30-50cm in front of the laptop.
+
+### 4. Motion Tracking (Part 2)
+
+See continuous motion tracking visualization:
+
+```bash
+python main.py track --tracking
+```
+
+This shows:
+- Real-time velocity `v̂(t)` strip chart
+- Position `x̂(t)` tracking dot
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `python main.py scan` | Find best carrier frequency |
+| `python main.py visualize` | Real-time spectrogram |
+| `python main.py visualize --tracking` | With motion tracking plots |
+| `python main.py detect` | Gesture detection mode |
+| `python main.py track` | Motion tracking demo |
+| `python main.py track --kalman` | Kalman filter tracking |
+| `python main.py collect` | Collect training data |
+| `python main.py train --dataset data/dataset.json` | Train classifier |
 
 ## Configuration
 
-Edit `config.py` or pass command-line arguments:
+Key parameters (adjustable via CLI):
 
-```bash
-python airswipe.py --freq 18500 --visualize --threshold 2.0
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--freq` | 18500 | Carrier frequency (Hz) |
+| `--threshold` | 0.5 | Activity detection threshold |
+| `--amplitude` | 0.3 | Tone amplitude (0-1) |
+| `--cooldown` | 0.5 | Seconds between gestures |
+| `--smoothing` | 0.85 | EMA smoothing factor |
+
+## Project Structure
+
 ```
+AirSwipe/
+├── airswipe/
+│   ├── __init__.py
+│   ├── config.py        # Configuration dataclass
+│   ├── audio_tx.py      # Tone generation
+│   ├── audio_rx.py      # Microphone capture
+│   ├── dsp.py           # Signal processing & features
+│   ├── segmentation.py  # Gesture event detection
+│   ├── model.py         # Classifiers (logistic + CNN)
+│   ├── tracker.py       # Motion tracking (Part 2)
+│   ├── ui.py            # Visualization
+│   └── dataset.py       # Data collection & training
+├── main.py              # CLI entry point
+├── requirements.txt
+└── README.md
+```
+
+## Tips for Best Results
+
+1. **Environment:** Works best in quiet rooms with hard surfaces
+2. **Distance:** 20-80cm from laptop is ideal
+3. **Speed:** Medium-speed swipes work best initially
+4. **Calibration:** Run `scan` first to find optimal frequency
+5. **Background:** Keep hands away during baseline calibration
 
 ## Troubleshooting
 
-**No audio output?**
-- Check System Preferences → Sound → Output
-- Ensure volume is not muted
+**No carrier peak visible:**
+- Try different frequencies with `--freq`
+- Run `scan` to find working frequency
 
-**Microphone not working?**
-- Grant microphone permissions: System Preferences → Privacy → Microphone
-- Check `python` or `Terminal` has microphone access
+**Too many false positives:**
+- Increase `--threshold`
+- Ensure proper baseline calibration (keep still for first 2 seconds)
 
-**High false positive rate?**
-- Increase detection threshold
-- Ensure quiet environment
-- Check for ultrasonic interference (some electronics emit high frequencies)
+**Gestures not detected:**
+- Decrease `--threshold`
+- Swipe closer to the laptop
+- Try faster/slower swipe speeds
 
-## Contributing
+## Technical Details
 
-This is an experimental research project. Contributions welcome!
+- **Sample Rate:** 48 kHz
+- **FFT Size:** 2048 (≈23.4 Hz frequency resolution)
+- **Hop Size:** 512 (≈10.7 ms time resolution)
+- **Carrier Range:** 16-19.5 kHz (ultrasonic, mostly inaudible)
+- **Doppler Bandwidth:** ±500 Hz around carrier
 
-1. Fork the repo
-2. Create a feature branch
-3. Submit a PR
-
-## License
-
-MIT License — See [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-Inspired by research in acoustic sensing (FingerIO, SoundWave, etc.) and the desire to make gesture input accessible without specialized hardware.
-
----
-
-*AirSwipe is a research demo, not a production system. Use responsibly.*
-
-
+## LicenseMIT License - see [LICENSE](LICENSE)

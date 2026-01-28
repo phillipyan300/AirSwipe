@@ -16,12 +16,12 @@ class Config:
     # Audio Settings
     # ==========================================================================
     sample_rate: int = 48000              # Hz - preferred for ultrasonic work
-    carrier_freq: float = 18500.0         # Hz - ultrasonic carrier (17-19.5 kHz)
-    tone_amplitude: float = 0.3           # 0-1, amplitude of output tone
+    carrier_freq: float = 19000.0         # Hz - ultrasonic carrier (18.5-20 kHz)
+    tone_amplitude: float = 0.15          # 0-1, amplitude (lower = less audible crackling)
     
-    # Carrier scan candidates (Hz)
+    # Carrier scan candidates (Hz) - higher frequencies to avoid audible range
     carrier_candidates: List[float] = field(default_factory=lambda: [
-        16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500
+        18500, 19000, 19500, 20000, 20500, 21000
     ])
     
     # ==========================================================================
@@ -31,8 +31,8 @@ class Config:
     hop_size: int = 512                   # H - samples between frames
     window_type: str = "hann"             # Window function
     
-    # Derived: freq resolution = sample_rate / fft_size ≈ 23.4 Hz at 48kHz
-    # Derived: time resolution = hop_size / sample_rate ≈ 10.7 ms at 48kHz
+    # Derived: freq resolution = sample_rate / fft_size ≈ 23.4 Hz at 48kHz -> Doppler shifts clearly seen
+    # Derived: time resolution = hop_size / sample_rate ≈ 10.7 ms at 48kHz -> Should be enough to catch fast hand movements
     
     # ==========================================================================
     # Feature Extraction
@@ -74,7 +74,7 @@ class Config:
     # Visualization
     # ==========================================================================
     spectrogram_history_sec: float = 3.0  # Seconds of spectrogram to display
-    ui_update_interval_ms: int = 50       # UI refresh rate
+    ui_update_interval_ms: int = 100      # UI refresh rate (slower = more stable)
     
     # ==========================================================================
     # Dataset Collection

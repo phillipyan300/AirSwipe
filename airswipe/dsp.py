@@ -141,6 +141,7 @@ class DSP:
             
         Returns:
             (times, freqs, Sxx) - time bins, frequency bins, power spectral density
+            Sxx shape is (n_freqs, n_times) for use with pcolormesh(times, freqs, Sxx)
         """
         freqs, times, Sxx = signal.spectrogram(
             audio,
@@ -151,6 +152,7 @@ class DSP:
             scaling='density',
             mode='magnitude'
         )
+        # scipy returns (freqs, times, Sxx) with Sxx shape (n_freqs, n_times)
         return times, freqs, Sxx
     
     def update_baseline(self, spectrum: np.ndarray):
