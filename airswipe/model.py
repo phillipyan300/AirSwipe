@@ -36,7 +36,8 @@ class BaselineClassifier:
     
     FEATURE_NAMES = [
         'mean_d', 'max_d', 'min_d', 'slope_d', 
-        'signed_area', 'duration', 'max_a', 'std_d'
+        'signed_area', 'duration', 'max_a', 'std_d', 
+        'peak_order', 'peak_asymmetry'
     ]
     
     def __init__(self, config: Config):
@@ -44,10 +45,15 @@ class BaselineClassifier:
         self._weights: Optional[np.ndarray] = None
         self._bias: Optional[np.ndarray] = None
         self._fitted = False
+        self._feature_mean: Optional[np.ndarray] = None
+        self._feature_std: Optional[np.ndarray] = None
+        # Labels for prediction (set during fit, or default to 3-class)
+        self._labels = [GestureLabel.NONE, GestureLabel.LEFT, GestureLabel.RIGHT]
     
     def extract_features(self, d_values: np.ndarray, 
                         a_values: np.ndarray,
-                        duration: float) -> np.ndarray:
+                        duration: float,
+                        center: bool = True) -> np.ndarray:
         """
         Extract summary features from D(t) and A(t) time series.
         
@@ -55,6 +61,7 @@ class BaselineClassifier:
             d_values: Signed Doppler proxy over time
             a_values: Activity values over time
             duration: Event duration in seconds
+            center: If True, center D values (subtract mean) to remove offset
             
         Returns:
             Feature vector
@@ -62,25 +69,57 @@ class BaselineClassifier:
         if len(d_values) < 2:
             return np.zeros(len(self.FEATURE_NAMES))
         
-        # Basic statistics
-        mean_d = np.mean(d_values)
-        max_d = np.max(d_values)
-        min_d = np.min(d_values)
-        std_d = np.std(d_values)
+        # Per-sample centering: remove offset so we focus on the PATTERN
+        # This makes features invariant to baseline drift
+        if center:
+            d_mean = np.mean(d_values)
+            d_centered = d_values - d_mean
+        else:
+            d_centered = d_values
+            d_mean = np.mean(d_values)
         
-        # Slope via linear regression
-        x = np.arange(len(d_values))
-        slope_d = np.polyfit(x, d_values, 1)[0] if len(d_values) > 2 else 0
+        # Basic statistics (on centered values)
+        mean_d = np.mean(d_centered)  # Will be ~0 if centered
+        max_d = np.max(d_centered)
+        min_d = np.min(d_centered)
+        std_d = np.std(d_centered)
         
-        # Signed area (integral)
-        signed_area = np.sum(d_values)
+        # Slope via linear regression (on centered values)
+        # This captures: did D go from high to low (negative slope = left)
+        #                or low to high (positive slope = right)
+        x = np.arange(len(d_centered))
+        slope_d = np.polyfit(x, d_centered, 1)[0] if len(d_centered) > 2 else 0
         
-        # Activity
+        # Signed area of centered values
+        # After centering, this captures asymmetry: 
+        # - If D started high and ended low, area will be positive in first half, negative in second
+        signed_area = np.sum(d_centered)
+        
+        # Activity (unchanged - this is about magnitude, not direction)
         max_a = np.max(a_values)
+        
+        # Peak order: did the max come before or after the min?
+        # This directly encodes the temporal pattern:
+        #   LEFT:  D goes high→low, so max comes BEFORE min → negative peak_order
+        #   RIGHT: D goes low→high, so min comes BEFORE max → positive peak_order
+        #   NONE:  random, near zero
+        t_max = np.argmax(d_centered)
+        t_min = np.argmin(d_centered)
+        peak_order = (t_max - t_min) / len(d_centered)  # Normalize by length
+        
+        # Peak asymmetry: which peak is bigger in magnitude?
+        # This is a NONLINEAR comparison that linear classifier can't learn from raw max/min
+        #   LEFT:  |min_d| > max_d → negative asymmetry
+        #   RIGHT: max_d > |min_d| → positive asymmetry
+        #   NONE:  balanced → near zero
+        abs_min = abs(min_d)
+        denom = max_d + abs_min + 1e-8  # Avoid division by zero
+        peak_asymmetry = (max_d - abs_min) / denom
         
         features = np.array([
             mean_d, max_d, min_d, slope_d,
-            signed_area, duration, max_a, std_d
+            signed_area, duration, max_a, std_d, 
+            peak_order, peak_asymmetry
         ])
         
         return features
@@ -104,10 +143,9 @@ class BaselineClassifier:
         probs = self._softmax(logits)
         
         label_idx = np.argmax(probs)
-        labels = [GestureLabel.NONE, GestureLabel.LEFT, GestureLabel.RIGHT]
         
         return Prediction(
-            label=labels[label_idx],
+            label=self._labels[label_idx],
             confidence=probs[label_idx],
             probabilities=probs
         )
@@ -155,18 +193,28 @@ class BaselineClassifier:
     
     def fit(self, X: np.ndarray, y: np.ndarray, 
             learning_rate: float = 0.01, 
-            epochs: int = 1000):
+            epochs: int = 1000,
+            labels: Optional[List[GestureLabel]] = None):
         """
         Train the classifier.
         
         Args:
             X: Feature matrix (n_samples, n_features)
-            y: Labels (n_samples,) - 0=none, 1=left, 2=right
+            y: Labels (n_samples,) - indices into labels list
             learning_rate: SGD learning rate
             epochs: Training epochs
+            labels: List of GestureLabel in order of class indices
         """
         n_samples, n_features = X.shape
-        n_classes = 3
+        n_classes = len(np.unique(y))
+        
+        # Set labels for prediction
+        if labels is not None:
+            self._labels = labels
+        elif n_classes == 2:
+            self._labels = [GestureLabel.LEFT, GestureLabel.RIGHT]
+        else:
+            self._labels = [GestureLabel.NONE, GestureLabel.LEFT, GestureLabel.RIGHT]
         
         # Initialize weights
         self._weights = np.random.randn(n_features, n_classes) * 0.01
@@ -175,7 +223,11 @@ class BaselineClassifier:
         # One-hot encode labels
         y_onehot = np.eye(n_classes)[y]
         
-        # SGD training
+        # SGD training with early stopping
+        best_loss = float('inf')
+        patience = 50  # Stop if no improvement for 50 epochs
+        patience_counter = 0
+        
         for epoch in range(epochs):
             # Forward pass
             logits = X @ self._weights + self._bias
@@ -193,9 +245,22 @@ class BaselineClassifier:
             self._weights -= learning_rate * grad_w
             self._bias -= learning_rate * grad_b
             
+            # Early stopping check
+            if loss < best_loss - 1e-4:
+                best_loss = loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
             if epoch % 100 == 0:
                 accuracy = np.mean(np.argmax(probs, axis=1) == y)
                 print(f"Epoch {epoch}: loss={loss:.4f}, accuracy={accuracy:.3f}")
+            
+            # Stop early if converged
+            if patience_counter >= patience and accuracy == 1.0:
+                accuracy = np.mean(np.argmax(probs, axis=1) == y)
+                print(f"Epoch {epoch}: loss={loss:.4f}, accuracy={accuracy:.3f} (early stop)")
+                break
         
         self._fitted = True
     
@@ -206,10 +271,15 @@ class BaselineClassifier:
     
     def save(self, path: str):
         """Save model to file."""
+        # Convert GestureLabel to strings for pickling
+        label_strings = [l.value for l in self._labels]
         data = {
             'weights': self._weights,
             'bias': self._bias,
-            'fitted': self._fitted
+            'fitted': self._fitted,
+            'feature_mean': getattr(self, '_feature_mean', None),
+            'feature_std': getattr(self, '_feature_std', None),
+            'labels': label_strings
         }
         with open(path, 'wb') as f:
             pickle.dump(data, f)
@@ -221,6 +291,19 @@ class BaselineClassifier:
         self._weights = data['weights']
         self._bias = data['bias']
         self._fitted = data['fitted']
+        self._feature_mean = data.get('feature_mean')
+        self._feature_std = data.get('feature_std')
+        # Load labels (with backwards compatibility)
+        if 'labels' in data:
+            self._labels = [GestureLabel(l) for l in data['labels']]
+        else:
+            self._labels = [GestureLabel.NONE, GestureLabel.LEFT, GestureLabel.RIGHT]
+    
+    def normalize_features(self, features: np.ndarray) -> np.ndarray:
+        """Normalize features using stored mean/std."""
+        if self._feature_mean is not None and self._feature_std is not None:
+            return (features - self._feature_mean) / self._feature_std
+        return features
 
 
 # ============================================================================

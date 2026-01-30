@@ -193,13 +193,14 @@ class DSP:
         return np.maximum(subtracted, 0)
     
     def extract_features(self, audio: np.ndarray, 
-                        use_baseline: bool = True) -> DopplerFeatures:
+                        use_baseline: bool = False) -> DopplerFeatures:
         """
         Extract Doppler features from audio.
         
         Args:
             audio: Audio samples (at least fft_size)
-            use_baseline: Whether to apply background subtraction
+            use_baseline: Whether to apply background subtraction.
+                          Default False to match training data collection.
             
         Returns:
             DopplerFeatures containing e_above, e_below, d, a

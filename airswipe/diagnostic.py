@@ -10,6 +10,14 @@ import sys
 import time
 import numpy as np
 
+# Import Config for default values (single source of truth)
+try:
+    from .config import Config
+    _DEFAULT_CONFIG = Config()
+except ImportError:
+    # Fallback if running as standalone script
+    _DEFAULT_CONFIG = None
+
 def check_imports():
     """Check all required imports."""
     print("=" * 50)
@@ -97,7 +105,12 @@ def check_sample_rates():
     return True
 
 
-def test_tone_output(duration=1.0, freq=18500, amplitude=0.3):
+def test_tone_output(duration=1.0, freq=None, amplitude=None):
+    # Use Config defaults if not specified
+    if freq is None:
+        freq = _DEFAULT_CONFIG.carrier_freq if _DEFAULT_CONFIG else 18500
+    if amplitude is None:
+        amplitude = _DEFAULT_CONFIG.tone_amplitude if _DEFAULT_CONFIG else 0.15
     """Test playing a tone."""
     print("\n" + "=" * 50)
     print("4. TONE OUTPUT TEST")
@@ -158,7 +171,10 @@ def test_microphone(duration=1.0):
         return False
 
 
-def test_duplex(duration=1.0, freq=18500):
+def test_duplex(duration=1.0, freq=None):
+    # Use Config defaults if not specified
+    if freq is None:
+        freq = _DEFAULT_CONFIG.carrier_freq if _DEFAULT_CONFIG else 18500
     """Test simultaneous play and record."""
     print("\n" + "=" * 50)
     print("6. DUPLEX TEST (Play + Record)")

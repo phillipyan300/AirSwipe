@@ -121,6 +121,7 @@ class DatasetCollector:
         print("  l - record LEFT swipe")
         print("  r - record RIGHT swipe")
         print("  n - record NONE (idle)")
+        print("  a - AUTO mode (guided collection)")
         print("  s - show statistics")
         print("  q - quit and save")
         print("\n" + "-" * 60)
@@ -133,7 +134,7 @@ class DatasetCollector:
                       f"right={counts.get('right', 0)}, "
                       f"none={counts.get('none', 0)}")
                 
-                cmd = input("\nCommand (l/r/n/s/q): ").strip().lower()
+                cmd = input("\nCommand (l/r/n/a/s/q): ").strip().lower()
                 
                 if cmd == 'l':
                     print("\n>>> Perform LEFT swipe when ready...")
@@ -150,6 +151,9 @@ class DatasetCollector:
                     time.sleep(0.5)
                     self.record_sample(GestureLabel.NONE)
                 
+                elif cmd == 'a':
+                    self.auto_collection(target_per_class)
+                
                 elif cmd == 's':
                     self._print_statistics()
                 
@@ -164,6 +168,95 @@ class DatasetCollector:
         
         # Save on exit
         self.save()
+    
+    def auto_collection(self, target_per_class: int = 30):
+        """
+        Automatic guided collection with countdowns.
+        
+        Cycles through gestures automatically with audio/visual cues.
+        """
+        print("\n" + "=" * 60)
+        print("  AUTO COLLECTION MODE")
+        print("=" * 60)
+        print("\nThis will guide you through recording samples automatically.")
+        print("Press Ctrl+C at any time to stop and return to menu.")
+        print("\nGet ready! Starting in 3 seconds...")
+        time.sleep(3)
+        
+        # Determine how many more samples we need for each class
+        counts = self._get_label_counts()
+        left_needed = max(0, target_per_class - counts.get('left', 0))
+        right_needed = max(0, target_per_class - counts.get('right', 0))
+        none_needed = max(0, target_per_class - counts.get('none', 0))
+        
+        # Build collection schedule - interleave for variety
+        schedule = []
+        max_needed = max(left_needed, right_needed, none_needed)
+        
+        for i in range(max_needed):
+            if i < left_needed:
+                schedule.append(GestureLabel.LEFT)
+            if i < right_needed:
+                schedule.append(GestureLabel.RIGHT)
+            if i < none_needed:
+                schedule.append(GestureLabel.NONE)
+        
+        if not schedule:
+            print("\n✓ Already have enough samples for all classes!")
+            return
+        
+        total = len(schedule)
+        print(f"\nWill collect {total} samples:")
+        print(f"  - {left_needed} LEFT swipes")
+        print(f"  - {right_needed} RIGHT swipes")  
+        print(f"  - {none_needed} NONE (idle)")
+        print("\n" + "-" * 60)
+        
+        try:
+            for idx, label in enumerate(schedule):
+                progress = f"[{idx + 1}/{total}]"
+                
+                # Announce what's coming
+                if label == GestureLabel.LEFT:
+                    instruction = "LEFT SWIPE (hand moves →)"
+                elif label == GestureLabel.RIGHT:
+                    instruction = "RIGHT SWIPE (hand moves ←)"
+                else:
+                    instruction = "NONE (stay still)"
+                
+                print(f"\n{progress} Next: {instruction}")
+                
+                # Countdown
+                for countdown in [3, 2, 1]:
+                    print(f"  {countdown}...", end=" ", flush=True)
+                    time.sleep(1)
+                
+                # Record
+                if label == GestureLabel.NONE:
+                    print("HOLD STILL!")
+                else:
+                    print("GO!")
+                
+                self.record_sample(label)
+                
+                # Brief pause between samples
+                time.sleep(0.5)
+                
+                # Progress update every 5 samples
+                if (idx + 1) % 5 == 0:
+                    counts = self._get_label_counts()
+                    print(f"\n  Progress: left={counts.get('left', 0)}, "
+                          f"right={counts.get('right', 0)}, "
+                          f"none={counts.get('none', 0)}")
+            
+            print("\n" + "=" * 60)
+            print("  AUTO COLLECTION COMPLETE!")
+            print("=" * 60)
+            self._print_statistics()
+            
+        except KeyboardInterrupt:
+            print("\n\n⚠ Auto collection interrupted")
+            print("Returning to menu (samples so far are saved)...")
     
     def _get_label_counts(self) -> Dict[str, int]:
         """Get count of samples per label."""
@@ -290,7 +383,11 @@ class DatasetProcessor:
         X_list = []
         y_list = []
         
-        label_map = {'none': 0, 'left': 1, 'right': 2}
+        # Auto-detect labels present in dataset
+        labels_present = sorted(set(s.label for s in samples))
+        label_map = {label: i for i, label in enumerate(labels_present)}
+        print(f"  Labels: {labels_present} -> {label_map}")
+        
         classifier = BaselineClassifier(self.config)
         
         for sample in samples:
@@ -327,6 +424,111 @@ class DatasetProcessor:
             y_list.append(label_map[sample.label])
         
         return np.array(X_list), np.array(y_list)
+    
+    def extract_d_series(self, samples: List[Sample], seq_len: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extract D(t) time series for 1D CNN.
+        
+        Args:
+            samples: List of Sample objects
+            seq_len: Target sequence length (will pad/truncate)
+            
+        Returns:
+            (X, y) - D(t) series (N, seq_len), labels (N,)
+        """
+        X_list = []
+        y_list = []
+        
+        # Auto-detect labels
+        labels_present = sorted(set(s.label for s in samples))
+        label_map = {label: i for i, label in enumerate(labels_present)}
+        
+        for sample in samples:
+            # Extract D(t) series from audio
+            d_values = []
+            
+            n_frames = len(sample.audio) // self.config.hop_size
+            for t in range(n_frames):
+                offset = t * self.config.hop_size
+                frame = sample.audio[offset:offset + self.config.fft_size]
+                if len(frame) < self.config.fft_size:
+                    break
+                
+                features = self.dsp.extract_features(frame, use_baseline=False)
+                d_values.append(features.d)
+            
+            if len(d_values) < 3:
+                continue
+            
+            # Pad or truncate to seq_len
+            d_array = np.array(d_values)
+            if len(d_array) < seq_len:
+                padded = np.zeros(seq_len)
+                padded[:len(d_array)] = d_array
+                d_array = padded
+            elif len(d_array) > seq_len:
+                # Take middle portion
+                start = (len(d_array) - seq_len) // 2
+                d_array = d_array[start:start + seq_len]
+            
+            X_list.append(d_array)
+            y_list.append(label_map[sample.label])
+        
+        return np.array(X_list, dtype=np.float32), np.array(y_list)
+    
+    def extract_spectrograms(self, samples: List[Sample], 
+                            freq_bins: int = 64, time_frames: int = 64) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extract spectrogram patches for 2D CNN.
+        
+        Args:
+            samples: List of Sample objects
+            freq_bins: Target frequency bins
+            time_frames: Target time frames
+            
+        Returns:
+            (X, y) - Spectrograms (N, freq_bins, time_frames), labels (N,)
+        """
+        from scipy.ndimage import zoom
+        
+        X_list = []
+        y_list = []
+        
+        # Auto-detect labels
+        labels_present = sorted(set(s.label for s in samples))
+        label_map = {label: i for i, label in enumerate(labels_present)}
+        
+        for sample in samples:
+            # Compute spectrogram
+            times, freqs, Sxx = self.dsp.compute_spectrogram(sample.audio)
+            
+            # Filter to carrier band
+            cf = self.config.carrier_freq
+            bw = self.config.doppler_bandwidth * 2
+            freq_min = cf - bw
+            freq_max = cf + bw
+            freq_mask = (freqs >= freq_min) & (freqs <= freq_max)
+            
+            Sxx_filtered = Sxx[freq_mask, :]
+            
+            if Sxx_filtered.size == 0:
+                continue
+            
+            # Convert to dB
+            Sxx_db = 10 * np.log10(Sxx_filtered + 1e-10)
+            
+            # Resize to target dimensions
+            if Sxx_db.shape != (freq_bins, time_frames):
+                zoom_factors = (freq_bins / Sxx_db.shape[0], time_frames / Sxx_db.shape[1])
+                Sxx_db = zoom(Sxx_db, zoom_factors, order=1)
+            
+            # Normalize to [0, 1]
+            Sxx_norm = (Sxx_db - Sxx_db.min()) / (Sxx_db.max() - Sxx_db.min() + 1e-8)
+            
+            X_list.append(Sxx_norm)
+            y_list.append(label_map[sample.label])
+        
+        return np.array(X_list, dtype=np.float32), np.array(y_list)
     
     def train_test_split(self, X: np.ndarray, y: np.ndarray,
                         train_ratio: float = 0.7,

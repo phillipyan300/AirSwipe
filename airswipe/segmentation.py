@@ -115,13 +115,20 @@ class GestureSegmenter:
         event = None
         
         if self._state == SegmentationState.IDLE:
-            # Check for onset
-            if features.a > self._threshold:
+            # Check for onset (must be above threshold but below cap)
+            # Very high activity is likely noise/crackle, not a gesture
+            if features.a > self._threshold and features.a < self.config.activity_cap:
                 self._state = SegmentationState.ONSET
                 self._event_start_time = timestamp
                 self._event_features = [features]
         
         elif self._state == SegmentationState.ONSET:
+            # Abort if activity spikes too high (noise/crackle)
+            if features.a >= self.config.activity_cap:
+                self._state = SegmentationState.IDLE
+                self._event_features = []
+                return None
+            
             self._event_features.append(features)
             
             # Check if we have minimum duration
@@ -135,6 +142,12 @@ class GestureSegmenter:
                 self._event_features = []
         
         elif self._state == SegmentationState.ACTIVE:
+            # Abort if activity spikes too high (noise/crackle contaminated the gesture)
+            if features.a >= self.config.activity_cap:
+                self._state = SegmentationState.IDLE
+                self._event_features = []
+                return None
+            
             self._event_features.append(features)
             duration = timestamp - self._event_start_time
             

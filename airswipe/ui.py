@@ -26,11 +26,16 @@ class ConsoleUI:
         self.config = config
         self._last_gesture: Optional[GestureEvent] = None
         self._gesture_display_time = 0.0
+        self._d_history = deque(maxlen=20)  # Track recent D values
+        self._frame_count = 0
     
     def update(self, features: DopplerFeatures, 
                tracking: Optional[TrackingState] = None,
                gesture: Optional[GestureEvent] = None):
         """Update console display."""
+        
+        self._frame_count += 1
+        self._d_history.append(features.d)
         
         if gesture is not None:
             self._last_gesture = gesture
@@ -41,48 +46,65 @@ class ConsoleUI:
         bar_len = int(activity * 40)
         bar = "█" * bar_len + "░" * (40 - bar_len)
         
-        # Direction indicator
-        if features.d > 0:
-            direction = "◀ LEFT "
-        elif features.d < 0:
-            direction = " RIGHT▶"
+        # D history sparkline (shows trend)
+        if len(self._d_history) >= 5:
+            recent_d = list(self._d_history)[-10:]  # Last 10 values
+            d_trend = ""
+            for d in recent_d:
+                if d > 5:
+                    d_trend += "▲"  # Strong positive
+                elif d > 0.5:
+                    d_trend += "△"  # Weak positive
+                elif d < -5:
+                    d_trend += "▼"  # Strong negative
+                elif d < -0.5:
+                    d_trend += "▽"  # Weak negative
+                else:
+                    d_trend += "·"  # Near zero
         else:
-            direction = "   ○   "
+            d_trend = "." * 10
         
-        # Velocity bar (centered)
-        if tracking:
-            v = tracking.v_hat
-            v_pos = int((v + 1) * 20)  # Map [-1,1] to [0,40]
-            v_bar = "─" * 20 + "│" + "─" * 20
-            v_bar = v_bar[:v_pos] + "●" + v_bar[v_pos+1:]
+        # Direction indicator based on recent trend
+        recent_sum = sum(list(self._d_history)[-5:]) if len(self._d_history) >= 5 else 0
+        if recent_sum > 2:
+            direction = "◀◀"
+        elif recent_sum > 0.5:
+            direction = "◀ "
+        elif recent_sum < -2:
+            direction = "▶▶"
+        elif recent_sum < -0.5:
+            direction = " ▶"
         else:
-            v_bar = ""
+            direction = "○ "
         
         # Gesture display
         gesture_str = ""
-        if self._last_gesture and time.time() - self._gesture_display_time < 1.5:
+        if self._last_gesture and time.time() - self._gesture_display_time < 2.0:
             g = self._last_gesture
-            if g.label != GestureLabel.NONE:
-                emoji = "👈" if g.label == GestureLabel.LEFT else "👉"
-                gesture_str = f"  {emoji} {g.label.value.upper()} ({g.confidence:.0%})"
+            emoji = "👈" if g.label == GestureLabel.LEFT else ("👉" if g.label == GestureLabel.RIGHT else "·")
+            gesture_str = f" → {emoji} {g.label.value.upper()} ({g.confidence:.0%})"
         
-        # Print
-        status = f"\r[{bar}] {direction} A={features.a:.2f} D={features.d:+.2f}"
-        if v_bar:
-            status += f" V:[{v_bar}]"
+        # Print with D history
+        status = f"\r[{bar}] {direction} D:[{d_trend}] A={features.a:6.1f}"
         status += gesture_str
         
         print(status + " " * 10, end="", flush=True)
     
     def print_gesture(self, event: GestureEvent):
-        """Print gesture detection."""
-        if event.label == GestureLabel.NONE:
-            return
+        """Print gesture detection with details."""
+        emoji = "👈" if event.label == GestureLabel.LEFT else ("👉" if event.label == GestureLabel.RIGHT else "○")
         
-        emoji = "👈" if event.label == GestureLabel.LEFT else "👉"
+        # Calculate summary stats from the event
+        if event.features:
+            d_vals = [f.d for f in event.features]
+            mean_d = np.mean(d_vals)
+            signed_area = sum(d_vals)
+            info = f"mean_d={mean_d:+.1f}, area={signed_area:+.0f}"
+        else:
+            info = ""
+        
         print(f"\n✨ {emoji} {event.label.value.upper()} "
-              f"(confidence: {event.confidence:.0%}, "
-              f"duration: {event.duration:.2f}s)")
+              f"(conf={event.confidence:.0%}, dur={event.duration:.2f}s, {info})")
 
 
 class MatplotlibUI:
@@ -93,17 +115,26 @@ class MatplotlibUI:
     - Live spectrogram around carrier frequency
     - D(t) and A(t) feature traces
     - Motion tracking visualization (velocity strip chart, position dot)
+    - Optional: Gesture detection with ML predictions
     """
     
-    def __init__(self, config: Config, audio_source, dsp, tracker=None):
+    def __init__(self, config: Config, audio_source, dsp, tracker=None,
+                 segmenter=None, classifier=None):
         self.config = config
         self.audio = audio_source
         self.dsp = dsp
         self.tracker = tracker
+        self.segmenter = segmenter
+        self.classifier = classifier
         
         # History for plotting
         self._d_history = deque(maxlen=150)
         self._a_history = deque(maxlen=150)
+        
+        # Gesture detection history
+        self._prediction_history = []  # List of (time, label, confidence)
+        self._current_prediction = None  # (label, confidence, time_remaining)
+        self._prediction_display_duration = 1.0  # seconds to show prediction (shorter for responsiveness)
         
         # Gesture overlay
         self._gesture_text = ""
@@ -111,16 +142,30 @@ class MatplotlibUI:
         
         self._fig = None
         self._running = False
+        self._ax_prediction = None
     
     def start(self):
         """Start the visualization."""
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
+        from matplotlib.gridspec import GridSpec
         
         plt.style.use('dark_background')
         
         # Create figure with subplots
-        if self.tracker:
+        # Layout depends on what features are enabled
+        has_detection = self.segmenter is not None and self.classifier is not None
+        
+        if has_detection:
+            # 3 rows: spectrogram, features, prediction panel
+            self._fig = plt.figure(figsize=(14, 10))
+            gs = GridSpec(3, 1, height_ratios=[2, 2, 1], hspace=0.3)
+            self._ax_spec = self._fig.add_subplot(gs[0])
+            self._ax_features = self._fig.add_subplot(gs[1])
+            self._ax_prediction = self._fig.add_subplot(gs[2])
+            self._ax_velocity = None
+            self._ax_position = None
+        elif self.tracker:
             self._fig, axes = plt.subplots(2, 2, figsize=(14, 8))
             self._ax_spec = axes[0, 0]
             self._ax_features = axes[0, 1]
@@ -144,11 +189,17 @@ class MatplotlibUI:
         )
         
         self._running = True
-        plt.tight_layout()
+        try:
+            plt.tight_layout()
+        except Exception:
+            pass  # GridSpec layouts may not be compatible with tight_layout
         plt.show()
     
     def _update_plot(self, frame):
         """Update all plots."""
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        
         # Get audio and compute spectrogram
         audio = self.audio.get_buffer(self.config.spectrogram_history_sec)
         
@@ -156,7 +207,8 @@ class MatplotlibUI:
             return
         
         times, freqs, Sxx = self.dsp.compute_spectrogram(audio)
-        features = self.dsp.extract_features(audio)
+        # Use use_baseline=False to match training data
+        features = self.dsp.extract_features(audio, use_baseline=False)
         
         # Store feature history
         self._d_history.append(features.d)
@@ -289,6 +341,201 @@ class MatplotlibUI:
             self._ax_position.set_ylim(-0.6, 0.6)
             self._ax_position.axis('off')
             self._ax_position.set_title('x̂(t) Position Tracking', color='#00ff88')
+        
+        # === Prediction panel (when detection enabled) ===
+        if self._ax_prediction is not None and self.segmenter and self.classifier:
+            self._ax_prediction.clear()
+            
+            # Process gesture detection
+            gesture_event = self.segmenter.update(features)
+            
+            if gesture_event and len(gesture_event.features) >= 3:
+                # Run classifier
+                d_values = np.array([f.d for f in gesture_event.features])
+                a_values = np.array([f.a for f in gesture_event.features])
+                
+                # Check D variance - reject flat/noisy segments
+                d_variance = np.var(d_values)
+                
+                if d_variance < self.config.min_d_variance:
+                    # Not enough D variation - probably not a real gesture
+                    print(f"[REJECTED] D variance too low: {d_variance:.1f} < {self.config.min_d_variance} "
+                          f"(range: [{d_values.min():.1f}, {d_values.max():.1f}])")
+                else:
+                    # Check classifier type and predict accordingly
+                    classifier_name = self.classifier.__class__.__name__
+                    
+                    if 'CNN1D' in classifier_name:
+                        # CNN expects raw D(t) series
+                        pred = self.classifier.predict(d_values)
+                        feat_vec = None  # CNN doesn't use hand-crafted features
+                        
+                        # Debug: print D values and probabilities
+                        print(f"[CNN1D] D var:{d_variance:.0f} range:[{d_values.min():.1f}, {d_values.max():.1f}], "
+                              f"probs: {pred.probabilities}, pred: {pred.label.value} ({pred.confidence:.1%})")
+                    elif hasattr(self.classifier, 'extract_features'):
+                        # Logistic/Baseline expects feature vector
+                        feat_vec = self.classifier.extract_features(d_values, a_values, gesture_event.duration)
+                        feat_vec_norm = self.classifier.normalize_features(feat_vec)
+                        pred = self.classifier.predict(feat_vec_norm)
+                    else:
+                        # Fallback - try direct prediction
+                        pred = self.classifier.predict(d_values)
+                        feat_vec = None
+                    
+                    # Apply confidence gating - reject low-confidence predictions
+                    final_label = pred.label
+                    if pred.confidence < self.config.confidence_threshold:
+                        # Import GestureLabel for NONE
+                        from airswipe.segmentation import GestureLabel
+                        final_label = GestureLabel.NONE
+                    
+                    # Store prediction WITH features for display
+                    self._current_prediction = (final_label, pred.confidence, time.time(), feat_vec)
+                    self._prediction_history.append((time.time(), final_label, pred.confidence))
+                
+                # Keep only last 10 predictions
+                if len(self._prediction_history) > 10:
+                    self._prediction_history = self._prediction_history[-10:]
+            
+            # Draw prediction display
+            self._ax_prediction.set_xlim(0, 10)
+            self._ax_prediction.set_ylim(0, 1)
+            self._ax_prediction.axis('off')
+            
+            # Check current activity level
+            current_activity = features.a
+            is_active = current_activity > self.config.activity_threshold
+            
+            # Show prediction only when:
+            # 1. We have a recent prediction (within display duration)
+            # 2. AND either activity is high OR the prediction is very recent (< 0.5s)
+            if self._current_prediction:
+                # Unpack - handle both old (3-tuple) and new (4-tuple) formats
+                if len(self._current_prediction) == 4:
+                    label, conf, pred_time, feat_vec = self._current_prediction
+                else:
+                    label, conf, pred_time = self._current_prediction
+                    feat_vec = None
+                    
+                age = time.time() - pred_time
+                
+                if age < self._prediction_display_duration:
+                    # Show big prediction
+                    # Handle both GestureLabel enum and string
+                    label_str = label.value if hasattr(label, 'value') else str(label)
+                    if label_str == 'left':
+                        emoji, color = '<--', '#00ffff'
+                        text = 'LEFT'
+                    elif label_str == 'right':
+                        emoji, color = '-->', '#ff4488'
+                        text = 'RIGHT'
+                    else:
+                        emoji, color = '---', '#888888'
+                        text = 'NONE'
+                    
+                    # Fade out effect
+                    alpha = max(0.3, 1.0 - (age / self._prediction_display_duration) * 0.7)
+                    
+                    self._ax_prediction.text(
+                        5, 0.75, f'{emoji} {text}',
+                        ha='center', va='center',
+                        fontsize=40, fontweight='bold', color=color, alpha=alpha
+                    )
+                    self._ax_prediction.text(
+                        5, 0.55, f'Confidence: {conf:.0%}',
+                        ha='center', va='center',
+                        fontsize=14, color='#aaa', alpha=alpha
+                    )
+                    
+                    # Show key features
+                    if feat_vec is not None:
+                        # Features: mean_d[0], max_d[1], min_d[2], slope_d[3], signed_area[4], 
+                        #           duration[5], max_a[6], std_d[7], peak_order[8], peak_asymmetry[9]
+                        slope = feat_vec[3]
+                        max_a = feat_vec[6]
+                        peak_order = feat_vec[8]
+                        peak_asym = feat_vec[9]
+                        max_d = feat_vec[1]
+                        min_d = feat_vec[2]
+                        
+                        feature_text = (
+                            f"slope={slope:+.1f}  peak_asym={peak_asym:+.3f}  "
+                            f"peak_order={peak_order:+.2f}  max_A={max_a:.0f}"
+                        )
+                        self._ax_prediction.text(
+                            5, 0.35, feature_text,
+                            ha='center', va='center',
+                            fontsize=11, color='#888', alpha=alpha,
+                            family='monospace'
+                        )
+                        
+                        # Show max_d and min_d on second line
+                        feature_text2 = f"max_d={max_d:+.0f}  min_d={min_d:+.0f}"
+                        self._ax_prediction.text(
+                            5, 0.22, feature_text2,
+                            ha='center', va='center',
+                            fontsize=11, color='#666', alpha=alpha,
+                            family='monospace'
+                        )
+                else:
+                    # Waiting for gesture - show current activity and state
+                    if current_activity >= self.config.activity_cap:
+                        # Noise spike detected
+                        self._ax_prediction.text(
+                            5, 0.6, 'NOISE SPIKE (ignored)',
+                            ha='center', va='center',
+                            fontsize=18, color='#ff6666'
+                        )
+                    else:
+                        self._ax_prediction.text(
+                            5, 0.6, 'Waiting for gesture...',
+                            ha='center', va='center',
+                            fontsize=20, color='#555'
+                        )
+                    self._ax_prediction.text(
+                        5, 0.35, f'Activity: {current_activity:.0f} (range: {self.config.activity_threshold:.0f}-{self.config.activity_cap:.0f})',
+                        ha='center', va='center',
+                        fontsize=12, color='#444'
+                    )
+            else:
+                # No prediction yet - show activity
+                if current_activity >= self.config.activity_cap:
+                    self._ax_prediction.text(
+                        5, 0.6, 'NOISE SPIKE (ignored)',
+                        ha='center', va='center',
+                        fontsize=18, color='#ff6666'
+                    )
+                else:
+                    self._ax_prediction.text(
+                        5, 0.6, 'Waiting for gesture...',
+                        ha='center', va='center',
+                        fontsize=20, color='#555'
+                    )
+                self._ax_prediction.text(
+                    5, 0.35, f'Activity: {current_activity:.0f} (range: {self.config.activity_threshold:.0f}-{self.config.activity_cap:.0f})',
+                    ha='center', va='center',
+                    fontsize=12, color='#444'
+                )
+            
+            # Draw recent history bar at bottom
+            if self._prediction_history:
+                bar_width = 0.8
+                for i, (_, label, conf) in enumerate(self._prediction_history[-10:]):
+                    x = i * 1.0 + 0.5
+                    label_str = label.value if hasattr(label, 'value') else str(label)
+                    if label_str == 'left':
+                        color = '#00ffff'
+                    elif label_str == 'right':
+                        color = '#ff4488'
+                    else:
+                        color = '#444444'
+                    self._ax_prediction.add_patch(
+                        mpatches.Rectangle((x - bar_width/2, 0), bar_width, 0.1,
+                                           facecolor=color, alpha=0.7)
+                    )
+            
+            self._ax_prediction.set_title('Gesture Prediction', color='#00ff88', fontsize=14)
         
         self._fig.canvas.draw_idle()
     

@@ -16,12 +16,12 @@ class Config:
     # Audio Settings
     # ==========================================================================
     sample_rate: int = 48000              # Hz - preferred for ultrasonic work
-    carrier_freq: float = 19000.0         # Hz - ultrasonic carrier (18.5-20 kHz)
+    carrier_freq: float = 18500.0         # Hz - ultrasonic carrier (must match collection!)
     tone_amplitude: float = 0.15          # 0-1, amplitude (lower = less audible crackling)
     
     # Carrier scan candidates (Hz) - higher frequencies to avoid audible range
     carrier_candidates: List[float] = field(default_factory=lambda: [
-        18500, 19000, 19500, 20000, 20500, 21000
+        18500, 19000, 19500, 20000, 20500, 21000, 21500, 22000, 22500, 23000, 23500, 24000
     ])
     
     # ==========================================================================
@@ -46,7 +46,9 @@ class Config:
     # ==========================================================================
     # Segmentation / Event Detection
     # ==========================================================================
-    activity_threshold: float = 0.5       # A(t) threshold for event start
+    activity_threshold: float = 200.0     # A(t) min threshold - must exceed to trigger
+    activity_cap: float = 5000.0          # A(t) max cap - above this is noise/crackle, not gesture
+    min_d_variance: float = 500.0         # Minimum D variance - reject flat/noisy segments
     min_event_duration_sec: float = 0.15  # Minimum gesture duration
     max_event_duration_sec: float = 1.0   # Maximum gesture duration
     cooldown_sec: float = 0.5             # Cooldown between gestures
@@ -54,7 +56,7 @@ class Config:
     # ==========================================================================
     # Classification
     # ==========================================================================
-    confidence_threshold: float = 0.6     # Minimum confidence for gesture
+    confidence_threshold: float = 0.6     # Confidence gating: predictions below this → NONE
     smoothing_frames: int = 5             # Frames for majority voting
     
     # ==========================================================================
